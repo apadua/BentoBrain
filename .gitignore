@@ -1,4 +1,6 @@
 # Sensitive Data
 arduino/config.h
+arduino/.DS_Store
 esphome/secrets.yaml
-
+esphome/.DS_Store
+.DS_Store
