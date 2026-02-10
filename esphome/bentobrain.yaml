@@ -24,29 +24,11 @@ logger:
 api:
   encryption:
     key: !secret api_encryption_key
-  on_client_connected:
-    then:
-      - lambda: |-
-          ESP_LOGI("bentobrain", "");
-          ESP_LOGI("bentobrain", "****************************************");
-          ESP_LOGI("bentobrain", "*** CONNECTED TO HOME ASSISTANT ***");
-          ESP_LOGI("bentobrain", "****************************************");
-          ESP_LOGI("bentobrain", "");
-  on_client_disconnected:
-    then:
-      - lambda: |-
-          ESP_LOGW("bentobrain", "");
-          ESP_LOGW("bentobrain", "!!! DISCONNECTED FROM HOME ASSISTANT !!!");
-          ESP_LOGW("bentobrain", "");
 
 # Enable Over-The-Air updates
 ota:
   - platform: esphome
     password: !secret ota_password
-
-# Enable basic web server for status monitoring
-#web_server:
-#  port: 80
 
 # PWM Output for Fan Control
 output:
@@ -56,154 +38,54 @@ output:
     frequency: 25000 Hz  # 25 kHz PWM frequency (matches Arduino config)
     channel: 0
 
-# Fan Entity
+# Fan Entity - Controllable from Home Assistant with percentage speed
 fan:
   - platform: speed
     output: fan_pwm_output
     name: "BentoBrain Fan"
     id: bentobrain_fan
+    restore_mode: RESTORE_DEFAULT_OFF
 
-# Import Printer Status from Home Assistant
-text_sensor:
-  - platform: homeassistant
-    name: "Printer Status"
-    entity_id: sensor.x1c_print_status
-    id: printer_status
-    internal: false
-    on_value:
-      then:
-        - lambda: |-
-            ESP_LOGI("bentobrain", "=== Printer Status Update ===");
-            ESP_LOGI("bentobrain", "New printer status from HA: '%s'", x.c_str());
+# Fan RPM Monitoring (TACH pin)
+sensor:
+  # Pulse counter for TACH signal
+  - platform: pulse_counter
+    pin:
+      number: GPIO6
+      mode:
+        input: true
+        pullup: true
+    name: "Fan Pulses"
+    id: fan_pulses
+    internal: true  # Hide raw pulse count
+    unit_of_measurement: "pulses/min"
+    update_interval: 5s
+    count_mode:
+      rising_edge: INCREMENT
+      falling_edge: DISABLE
+    filters:
+      - multiply: 0.5  # Most fans output 2 pulses per revolution
+    accuracy_decimals: 0
 
-  # Diagnostic sensor showing current automation state
+  # Convert pulses to RPM
   - platform: template
-    name: "BentoBrain State"
-    id: automation_state
-    icon: "mdi:state-machine"
+    name: "Fan RPM"
+    id: fan_rpm
+    unit_of_measurement: "RPM"
+    icon: "mdi:fan"
+    accuracy_decimals: 0
+    lambda: |-
+      return id(fan_pulses).state;
+    update_interval: 5s
 
-# Global Variables (No Persistence)
-globals:
-  # Fan off delay in seconds (configurable via HA)
-  - id: fan_off_delay_seconds
-    type: int
-    restore_value: no
-    initial_value: '300'  # 5 minutes default
-
-  # Timestamp when printing stopped
-  - id: last_print_time
-    type: unsigned long
-    restore_value: no
-    initial_value: '0'
-
-  # Track if we've ever been in a printing state (to avoid fan-on at boot)
-  - id: has_printed
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-
-# Fan Off Delay Configuration
-number:
+# Binary sensor to detect fan failure
+binary_sensor:
   - platform: template
-    name: "Fan Off Delay"
-    id: fan_off_delay_number
-    min_value: 0
-    max_value: 3600
-    step: 30
-    unit_of_measurement: "seconds"
-    optimistic: true
-    initial_value: 300
-    icon: "mdi:timer"
-    set_action:
-      - globals.set:
-          id: fan_off_delay_seconds
-          value: !lambda 'return (int)x;'
-
-# Automatic Fan Control Logic
-interval:
-  - interval: 5s
-    then:
-      - lambda: |-
-          ESP_LOGI("bentobrain", "");
-          ESP_LOGI("bentobrain", "====== BentoBrain Check (every 5s) ======");
-
-          // Get current print status and configuration
-          std::string status = id(printer_status).state;
-          int delay_seconds = id(fan_off_delay_seconds);
-          bool has_printed_flag = id(has_printed);
-
-          ESP_LOGI("bentobrain", "Printer Status: '%s'", status.c_str());
-          ESP_LOGI("bentobrain", "Has Printed Before: %s", has_printed_flag ? "YES" : "NO");
-          ESP_LOGI("bentobrain", "Fan Off Delay: %d seconds", delay_seconds);
-
-          // Check if status is empty (not connected to HA or entity doesn't exist)
-          if (status.empty()) {
-            ESP_LOGW("bentobrain", "");
-            ESP_LOGW("bentobrain", "!!! WARNING: Printer Status is EMPTY !!!");
-            ESP_LOGW("bentobrain", "!!! Check Home Assistant connection !!!");
-            ESP_LOGW("bentobrain", "!!! Verify sensor.x1c_print_status exists !!!");
-            ESP_LOGW("bentobrain", "");
-          }
-
-          // Check if printer is actively printing or paused
-          // Note: Actual values are "running" and "pause", not "printing" and "paused"
-          if (status == "running" || status == "pause") {
-            ESP_LOGI("bentobrain", ">>> DECISION: Printer is ACTIVE <<<");
-
-            // Printer is active - turn fan on at full speed
-            auto call = id(bentobrain_fan).turn_on();
-            call.set_speed(100);
-            call.perform();
-
-            // Mark that we've seen a print job and update timestamp
-            id(has_printed) = true;
-            id(last_print_time) = millis();
-
-            ESP_LOGI("bentobrain", ">>> ACTION: Turning fan ON at 100%% <<<");
-            id(automation_state).publish_state("Printing - Fan ON");
-
-          } else if (id(has_printed)) {
-            ESP_LOGI("bentobrain", ">>> DECISION: Printer IDLE (after printing) <<<");
-
-            // Printer is idle but we've printed before - check if delay period has elapsed
-            unsigned long time_since_print = (millis() - id(last_print_time)) / 1000;
-
-            ESP_LOGI("bentobrain", "Time since print ended: %lu / %d seconds",
-                     time_since_print, delay_seconds);
-
-            if (time_since_print < delay_seconds) {
-              // Still within delay period - keep fan running
-              auto call = id(bentobrain_fan).turn_on();
-              call.set_speed(100);
-              call.perform();
-
-              ESP_LOGI("bentobrain", ">>> ACTION: COOLING DOWN - Fan ON (%lu/%d sec) <<<",
-                       time_since_print, delay_seconds);
-
-              char state_str[50];
-              snprintf(state_str, sizeof(state_str), "Cooling: %lu/%ds",
-                      time_since_print, delay_seconds);
-              id(automation_state).publish_state(state_str);
-
-            } else {
-              // Delay period expired - turn fan off
-              auto call = id(bentobrain_fan).turn_off();
-              call.perform();
-
-              ESP_LOGI("bentobrain", ">>> ACTION: Cooling COMPLETE - Fan OFF <<<");
-              id(automation_state).publish_state("Idle - Fan OFF");
-            }
-
-          } else {
-            ESP_LOGI("bentobrain", ">>> DECISION: Never printed yet <<<");
-
-            // Never printed yet - keep fan off
-            auto call = id(bentobrain_fan).turn_off();
-            call.perform();
-
-            ESP_LOGI("bentobrain", ">>> ACTION: Fan OFF (no print detected) <<<");
-            id(automation_state).publish_state("Waiting - Fan OFF");
-          }
-
-          ESP_LOGI("bentobrain", "=========================================");
-          ESP_LOGI("bentobrain", "");
+    name: "Fan Running"
+    id: fan_running
+    icon: "mdi:fan-alert"
+    lambda: |-
+      // Consider fan running if RPM > 100
+      return id(fan_rpm).state > 100;
+    filters:
+      - delayed_off: 10s  # Avoid false alarms during spin-up/down

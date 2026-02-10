@@ -1,29 +1,41 @@
 # BentoBrain ESPHome Implementation
 
-Ultra-simple, Home Assistant-centric smart fan controller for 3D printers. Automatically controls fan based on print status from Home Assistant's Bambu Lab integration.
+Simple smart fan controller for 3D printers with Home Assistant integration. Provides percentage-based PWM control and real-time RPM monitoring.
 
 ## Overview
 
-This ESPHome version provides "set it and forget it" automation by:
-- Leveraging Home Assistant's existing Bambu Lab integration
-- Eliminating direct MQTT subscription (no TLS, credentials, or JSON parsing)
-- Providing fully automatic operation (no manual control)
-- Removing local storage (no persistence needed)
+This ESPHome version provides a basic smart fan controller that:
+- Exposes a percentage-controllable fan entity (0-100%) in Home Assistant
+- Monitors actual fan speed via TACH pin (RPM sensor)
+- Detects fan failure (binary sensor)
+- All automation logic handled in Home Assistant (not on device)
 
 ## Hardware Requirements
 
-- **Platform**: ESP32 microcontroller
-- **Fan Control**: PWM-based (25 kHz)
-- **Default Fan Pin**: GPIO 6
+- **Platform**: ESP32 microcontroller (ESP32-C3 compatible)
+- **Fan Control**: PWM output on **GPIO5** (25 kHz)
+- **Fan Monitoring**: TACH input on **GPIO6** (for RPM sensing)
+- **Fan Type**: 4-pin PWM fan with TACH output
 - **Communication**: WiFi (2.4GHz)
+
+### Wiring
+
+```
+ESP32 GPIO5  → Fan PWM pin (Yellow wire)
+ESP32 GPIO6  → Fan TACH pin (Blue/Yellow wire)
+ESP32 GND    → Fan Ground (Black wire)
+External PSU → Fan +12V/24V (Red wire)
+```
 
 ## Prerequisites
 
 **Required before deployment:**
 1. ✅ Home Assistant installed and running
-2. ✅ Bambu Lab integration configured in HA
-3. ✅ Sensor `sensor.x1c_print_status` available and working
-4. ✅ ESPHome addon or CLI installed
+2. ✅ ESPHome addon or CLI installed
+3. ✅ 4-pin PWM fan with TACH output
+
+**Optional (for automation):**
+- Bambu Lab integration for printer status-based automation
 
 ## File Structure
 
@@ -36,23 +48,29 @@ esphome/
 
 ## Features
 
-### Automatic Print-Based Control
-- Monitors print status via Home Assistant's `sensor.x1c_print_status`
-- Fan turns **ON** at 100% when printer is "printing" or "paused"
-- Fan remains **ON** for configurable delay after printing stops
-- Fan turns **OFF** after delay expires
-- No temperature threshold - based purely on print state
+### Manual Fan Control
+- Percentage-based speed control (0-100%) from Home Assistant
+- PWM output at 25 kHz for smooth operation
+- On/Off toggle
+- Restores to OFF state on reboot
+
+### RPM Monitoring
+- Real-time fan speed monitoring via TACH pin
+- Updates every 5 seconds
+- Displays actual RPM in Home Assistant
+- Supports standard 2-pulse-per-revolution TACH signal
+
+### Fan Failure Detection
+- Binary sensor indicates if fan is actually spinning
+- Triggers OFF when RPM drops below 100
+- 10-second delay to avoid false alarms during spin-up/down
+- Useful for creating failure alert automations
 
 ### Home Assistant Integration
 - Native API integration (auto-discovered)
-- Fan entity exposed for monitoring
-- Configurable delay via number entity
-- Print status text sensor imported from HA
-
-### Configuration
-- **Fan Off Delay**: Adjustable from Home Assistant (default: 300 seconds)
-- **No Manual Control**: Fully automatic operation only
-- **No Persistence**: Settings reset to defaults on reboot
+- Fan entity with percentage slider
+- RPM sensor for monitoring
+- Fan running binary sensor for status/alerts
 
 ## Setup Instructions
 
@@ -74,14 +92,7 @@ api_encryption_key: ""  # Leave blank for auto-generation
 ota_password: "choose_secure_password"
 ```
 
-### 2. Verify Home Assistant Sensor
-
-Ensure the Bambu Lab integration sensor exists:
-1. Go to **Settings** → **Devices & Services** → **Bambu Lab**
-2. Verify `sensor.x1c_print_status` is available
-3. Check that it updates correctly when printing starts/stops
-
-### 3. Compile and Upload
+### 2. Compile and Upload
 
 ```bash
 # Navigate to ESPHome directory
@@ -97,15 +108,16 @@ esphome compile bentobrain.yaml
 esphome run bentobrain.yaml
 
 # Subsequent updates via OTA
-esphome run bentobrain.yaml --device bentobrain.local
+esphome run bentobrain.yaml --device bentobrain-v2.local
 ```
 
-### 4. Add to Home Assistant
+### 3. Add to Home Assistant
 
 The device will be auto-discovered:
-1. Navigate to **Settings** → **Devices & Services**
-2. Look for "BentoBrain" in discovered devices
-3. Click **Configure** and enter the API encryption key (if not auto-generated)
+1. Navigate to **Settings** → **Devices & Services** → **ESPHome**
+2. Look for "BentoBrain v2" in discovered devices
+3. Click **Configure** and complete setup
+4. **IMPORTANT**: After discovery, add the device to a device entry in Home Assistant for sensors to populate
 
 ## Home Assistant Entities
 
@@ -113,98 +125,150 @@ After integration, the following entities are created:
 
 | Entity | Type | Description |
 |--------|------|-------------|
-| `fan.bentobrain_fan` | Fan | Fan status (read-only, automatic control) |
-| `text_sensor.printer_status` | Text Sensor | Print status imported from HA |
-| `number.fan_off_delay` | Number | Delay before fan turns off (seconds) |
+| `fan.bentobrain_fan` | Fan | Fan control with percentage slider (0-100%) |
+| `sensor.fan_rpm` | Sensor | Current fan speed in RPM |
+| `binary_sensor.fan_running` | Binary Sensor | ON when fan is spinning (RPM > 100) |
 
-## Configuration
+## Usage
 
-### Adjusting Fan Off Delay
+### Manual Control
 
-1. In Home Assistant, navigate to the BentoBrain device
-2. Find **Fan Off Delay** number entity
-3. Adjust value (0-3600 seconds, 30-second increments)
-4. Changes take effect immediately
-5. **Note**: Value resets to 300s on device reboot
+**From Home Assistant UI:**
+1. Navigate to the BentoBrain device
+2. Use the fan entity to:
+   - Toggle fan on/off
+   - Adjust speed with percentage slider (0-100%)
+3. Monitor RPM in real-time
+4. Check "Fan Running" status
 
-### Monitoring Operation
+**From Automations/Scripts:**
+```yaml
+# Turn fan on at 75% speed
+service: fan.turn_on
+target:
+  entity_id: fan.bentobrain_fan
+data:
+  percentage: 75
 
-- Check fan entity state to see if fan is running
-- View printer status to see current print state
-- ESPHome logs show detailed operation (accessible via web or HA)
-
-## How It Works
-
-### Automatic Control Logic
-
-The device polls every 5 seconds and executes this logic:
-
-```
-IF printer status = "printing" OR "paused":
-    Turn fan ON at 100%
-    Record current time
-ELSE:
-    Calculate time since printing stopped
-    IF time < fan_off_delay:
-        Keep fan ON (cooling period)
-    ELSE:
-        Turn fan OFF
+# Turn fan off
+service: fan.turn_off
+target:
+  entity_id: fan.bentobrain_fan
 ```
 
-### Example Timeline
+### Example Automations
 
+#### Automatic Print Cooling
+
+```yaml
+automation:
+  # Turn fan on when printing starts
+  - alias: "BentoBrain - Fan On When Printing"
+    trigger:
+      - platform: state
+        entity_id: sensor.x1c_print_status
+        to: "running"
+    action:
+      - service: fan.turn_on
+        target:
+          entity_id: fan.bentobrain_fan
+        data:
+          percentage: 100
+
+  # Turn fan off 5 minutes after print finishes
+  - alias: "BentoBrain - Fan Off After Print"
+    trigger:
+      - platform: state
+        entity_id: sensor.x1c_print_status
+        from: "running"
+        to: "idle"
+        for:
+          minutes: 5
+    action:
+      - service: fan.turn_off
+        target:
+          entity_id: fan.bentobrain_fan
 ```
-00:00 - Print starts → Fan turns ON
-01:30 - Print completes → Fan stays ON (cooling)
-01:35 - 5 minutes elapsed → Fan turns OFF
+
+#### Fan Failure Alert
+
+```yaml
+automation:
+  - alias: "BentoBrain - Fan Failure Alert"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.fan_running
+        to: "off"
+        for:
+          seconds: 30
+    condition:
+      - condition: state
+        entity_id: fan.bentobrain_fan
+        state: "on"
+    action:
+      - service: notify.mobile_app
+        data:
+          title: "Fan Failure"
+          message: "BentoBrain fan has stopped! RPM: {{ states('sensor.fan_rpm') }}"
 ```
 
-## Architecture Comparison
+#### Speed-Based Cooling
 
-| Feature | Arduino Version | ESPHome Version |
-|---------|-----------------|-----------------|
-| **Data Source** | Direct MQTT from printer | HA Bambu Lab integration |
-| **Temperature Monitoring** | MQTT nozzle_temper | Print status only |
-| **MQTT Client** | PubSubClient + TLS | None |
-| **Manual Control** | Web UI + REST API | None (automatic only) |
-| **Configuration UI** | Custom web pages | Home Assistant UI |
-| **Settings Storage** | NVS (persistent) | RAM (non-persistent) |
-| **Credentials** | WiFi + MQTT (6 values) | WiFi only (2 values) |
-| **Standalone Operation** | Yes | No (requires HA) |
-| **Complexity** | Feature-rich, complex | Ultra-simple, single-purpose |
+```yaml
+automation:
+  # Low speed during prepare phase
+  - alias: "BentoBrain - Low Speed Prepare"
+    trigger:
+      - platform: state
+        entity_id: sensor.x1c_print_status
+        to: "prepare"
+    action:
+      - service: fan.turn_on
+        target:
+          entity_id: fan.bentobrain_fan
+        data:
+          percentage: 30
 
-## Benefits
+  # Full speed during printing
+  - alias: "BentoBrain - Full Speed Printing"
+    trigger:
+      - platform: state
+        entity_id: sensor.x1c_print_status
+        to: "running"
+    action:
+      - service: fan.turn_on
+        target:
+          entity_id: fan.bentobrain_fan
+        data:
+          percentage: 100
+```
 
-1. ✅ **Simpler Setup** - Only WiFi credentials needed (no MQTT config)
-2. ✅ **No TLS Complexity** - HA handles printer connection
-3. ✅ **Declarative Config** - YAML instead of C++ code
-4. ✅ **Native HA Integration** - Entities, automation, history built-in
-5. ✅ **Easier Updates** - OTA built into ESPHome
-6. ✅ **Better Logging** - Structured logs via API
-7. ✅ **No Manual Control Needed** - Pure automation
+## Monitoring
 
-## Trade-offs
+### Dashboard Card
 
-1. ⚠️ **Requires Home Assistant** - Cannot operate standalone
-2. ⚠️ **Requires Bambu Lab Integration** - Must have configured HA integration
-3. ⚠️ **No Manual Override** - Cannot manually control fan speed
-4. ⚠️ **No Persistence** - Delay setting resets to 300s on reboot
-5. ⚠️ **Print Status Only** - No direct temperature monitoring
-6. ⚠️ **Single Use Case** - Optimized for automatic print cooling only
+Add a card to your Home Assistant dashboard:
 
-## Design Philosophy
+```yaml
+type: entities
+title: BentoBrain Fan
+entities:
+  - entity: fan.bentobrain_fan
+  - entity: sensor.fan_rpm
+    icon: mdi:speedometer
+  - entity: binary_sensor.fan_running
+    icon: mdi:fan-alert
+```
 
-The ESPHome version intentionally trades **flexibility** for **simplicity**:
+### Logs
 
-- **Arduino**: Feature-rich standalone device with manual control, temperature monitoring, and persistence
-- **ESPHome**: Simple HA-dependent automation that "just works"
+View real-time logs via ESPHome:
+```bash
+esphome logs bentobrain.yaml
+```
 
-This makes the ESPHome version ideal for users who:
-- ✅ Already use Home Assistant
-- ✅ Have Bambu Lab integration configured
-- ✅ Want minimal configuration and maintenance
-- ✅ Don't need manual control or standalone operation
-- ✅ Prefer "set it and forget it" automation
+Or via Home Assistant:
+- **Settings** → **Devices & Services** → **ESPHome** → **BentoBrain v2** → **Logs**
 
 ## Troubleshooting
 
@@ -213,33 +277,33 @@ This makes the ESPHome version ideal for users who:
 2. Verify device and HA are on same network
 3. Check firewall settings (port 6053 for mDNS)
 4. Manually add via IP if auto-discovery fails
+5. **IMPORTANT**: Ensure device is added to Devices in Home Assistant (not just ESPHome integration)
 
-### Fan Not Turning On
-1. Verify `sensor.x1c_print_status` exists in HA
-2. Check ESPHome logs for print status updates
-3. Ensure printer is actually "printing" or "paused"
-4. Verify fan pin (GPIO6) is correct for your wiring
+### Fan Not Responding
+1. Verify fan pin (GPIO5) is correctly wired
+2. Check power supply to fan (12V or 24V external PSU)
+3. Test fan control from Home Assistant UI
+4. Check ESPHome logs for errors
 
-### Fan Won't Turn Off
-1. Check if delay is set too high
-2. Verify print status is not "printing" or "paused"
-3. Review ESPHome logs for timing information
-4. Restart device if timing seems stuck
+### RPM Shows 0 or Incorrect Values
+1. **Check wiring**: GPIO6 should connect to TACH pin (usually yellow or blue wire)
+2. **Verify fan type**: Must be 4-pin PWM fan with TACH output
+3. **Check TACH pulses**: Most fans use 2 pulses/revolution
+   - If RPM is double actual speed: Change `multiply: 0.5` to `multiply: 1.0`
+   - If RPM is half actual speed: Change `multiply: 0.5` to `multiply: 0.25`
+4. **Try without pullup**: Remove `pullup: true` if TACH signal is inverted
 
-### Settings Don't Persist
-This is **expected behavior** - settings are not persisted to flash. Fan off delay resets to 300 seconds on reboot. If persistence is needed, consider using the Arduino version instead.
-
-### Print Status Not Updating
-1. Verify Bambu Lab integration is working in HA
-2. Check that sensor entity name matches exactly
-3. Review HA logs for integration issues
-4. Restart Bambu Lab integration if needed
+### Fan Running Sensor Always OFF
+1. Turn fan on at high speed (>50%)
+2. Wait 10 seconds for delayed_off filter
+3. Check if RPM sensor is working (should show >100 RPM)
+4. Adjust threshold in YAML if needed (change `> 100` to different value)
 
 ## Customization
 
-### Changing Fan Pin
+### Changing Fan PWM Pin
 
-Edit [bentobrain.yaml](bentobrain.yaml) and change the GPIO pin:
+Edit [bentobrain.yaml](bentobrain.yaml):
 
 ```yaml
 output:
@@ -248,95 +312,113 @@ output:
     id: fan_pwm_output
 ```
 
-### Changing Polling Interval
+### Changing TACH Pin
 
-Edit the interval section:
-
-```yaml
-interval:
-  - interval: 10s  # Change from 5s to 10s
-    then:
-      - lambda: |-
-```
-
-### Adding Additional Print States
-
-Edit the lambda to include more states:
+Edit [bentobrain.yaml](bentobrain.yaml):
 
 ```yaml
-if (status == "printing" || status == "paused" || status == "prepare") {
+sensor:
+  - platform: pulse_counter
+    pin:
+      number: GPIO6  # Change to your pin
 ```
 
-## Advanced: Home Assistant Automations
+### Adjusting TACH Pulses Per Revolution
 
-You can create HA automations to extend functionality:
-
-### Example: Notification When Fan Turns On
+If your fan uses 1 pulse/revolution instead of 2:
 
 ```yaml
-automation:
-  - alias: "BentoBrain Fan Started"
-    trigger:
-      platform: state
-      entity_id: fan.bentobrain_fan
-      to: 'on'
-    action:
-      service: notify.mobile_app
-      data:
-        message: "BentoBrain fan activated - print detected"
+filters:
+  - multiply: 1.0  # Change from 0.5 to 1.0
 ```
 
-### Example: Override Delay Based on Filament
+### Changing Update Intervals
 
 ```yaml
-automation:
-  - alias: "BentoBrain ABS Extended Cooling"
-    trigger:
-      platform: state
-      entity_id: sensor.x1c_print_status
-      to: 'printing'
-    condition:
-      condition: template
-      value_template: "{{ 'ABS' in state_attr('sensor.x1c_print_name', 'filament') }}"
-    action:
-      service: number.set_value
-      target:
-        entity_id: number.fan_off_delay
-      data:
-        value: 600  # 10 minutes for ABS
+sensor:
+  - platform: pulse_counter
+    update_interval: 10s  # Change from 5s to 10s
 ```
 
-## Future Enhancements
+### Adjusting Fan Failure Threshold
 
-Possible additions while maintaining simplicity:
-- Status LED for visual feedback
-- Additional environmental sensors (temperature, humidity)
-- Multiple fan control (exhaust, intake, filter)
-- Home Assistant automations for advanced control
+```yaml
+binary_sensor:
+  - platform: template
+    lambda: |-
+      return id(fan_rpm).state > 200;  # Change from 100 to 200
+```
+
+## Architecture Comparison
+
+| Feature | Arduino Version | ESPHome Version |
+|---------|-----------------|-----------------|
+| **Data Source** | Direct MQTT from printer | Manual/HA Automations |
+| **Fan Control** | Manual + Automatic | Manual (via HA) |
+| **RPM Monitoring** | No | Yes (TACH pin) |
+| **Manual Control** | Web UI + REST API | Home Assistant UI |
+| **Automation Logic** | Built-in C++ code | Home Assistant YAML |
+| **Configuration UI** | Custom web pages | Home Assistant |
+| **Settings Storage** | NVS (persistent) | HA automations |
+| **Standalone Operation** | Yes | No (requires HA) |
+| **Complexity** | Higher (more code) | Lower (simple YAML) |
+
+## Benefits
+
+1. ✅ **Simple Configuration** - Just WiFi credentials needed
+2. ✅ **Flexible Automation** - All logic in HA (easy to modify)
+3. ✅ **RPM Monitoring** - Real-time fan speed feedback
+4. ✅ **Failure Detection** - Alert when fan stops
+5. ✅ **Percentage Control** - Smooth speed adjustment (0-100%)
+6. ✅ **Easy Updates** - OTA built into ESPHome
+7. ✅ **Native HA Integration** - Entities, automation, history
+
+## Trade-offs
+
+1. ⚠️ **Requires Home Assistant** - Cannot operate standalone
+2. ⚠️ **No Built-in Automation** - Must create HA automations
+3. ⚠️ **Manual Setup Required** - Device must be added to HA Devices
+4. ⚠️ **4-Pin Fan Required** - TACH monitoring needs 4-pin PWM fan
+
+## Design Philosophy
+
+The ESPHome version is designed as a **simple building block**:
+
+- **Device provides**: PWM control, RPM monitoring, status reporting
+- **Home Assistant provides**: Automation logic, scheduling, conditions
+- **Result**: Maximum flexibility with minimal device complexity
+
+This makes the ESPHome version ideal for users who:
+- ✅ Already use Home Assistant
+- ✅ Want flexible, customizable automation
+- ✅ Need RPM monitoring and failure detection
+- ✅ Prefer declarative YAML over embedded C++
+- ✅ Want easy configuration changes without reflashing
 
 ## Additional Resources
 
 - [ESPHome Documentation](https://esphome.io)
 - [ESPHome Fan Component](https://esphome.io/components/fan/speed.html)
+- [ESPHome Pulse Counter](https://esphome.io/components/sensor/pulse_counter.html)
+- [Home Assistant Automations](https://www.home-assistant.io/docs/automation/)
 - [Home Assistant Bambu Lab Integration](https://www.home-assistant.io/integrations/bambu_lab/)
-- [ESPHome Home Assistant Sensor](https://esphome.io/components/text_sensor/homeassistant.html)
 
 ## Alternative: Arduino Version
 
 A more feature-rich Arduino implementation is available in the `../arduino/` directory that:
 - Supports standalone operation (no HA required)
-- Includes manual control via web interface
-- Provides direct MQTT temperature monitoring
+- Includes built-in automatic print detection via MQTT
+- Provides manual control via web interface
 - Offers REST API for external control
+- Has temperature-based triggering
 
 See [../arduino/README.md](../arduino/README.md) for details.
 
 ## Notes for AI Assistants
 
 When working with the ESPHome version:
-- **Architecture is intentionally simple** - Don't add complexity
-- **No manual control by design** - This is automatic-only
-- **No persistence by design** - Device depends on HA connectivity
-- **Print status drives everything** - No temperature monitoring
-- **YAML changes require recompilation** - Not live-reloadable
-- **Test with actual HA integration** - Mock data won't work the same
+- **Intentionally minimal** - Device is just a smart fan controller
+- **Automation happens in HA** - Don't add complex logic to device
+- **YAML changes require reflashing** - Not live-reloadable
+- **RPM monitoring is optional** - Works without TACH pin connected
+- **Test with actual hardware** - PWM and TACH signals need physical verification
