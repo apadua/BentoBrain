@@ -1,0 +1,11 @@
+char ssid[32] = "wifi_ssid";
+char password[64] = "wifi_password";
+char mqtt_broker[64] = "192.168.1.66"; //3d Printer 
+char topic[64] = "device/+/report";
+char mqtt_username[32] = "bblp";
+char mqtt_password[32] = "<password>"; 3d Printer password obtained from LCD screen LAN Management
+int mqtt_port = 8883;
+int fanPin = 6;
+float tempThreshold = 180.0;
+unsigned long fanOffDelay = 300000;
+String authToken = "-1";
