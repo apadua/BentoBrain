@@ -1,3 +1,4 @@
 # Sensitive Data
-config.h
+arduino/config.h
+esphome/secrets.yaml
 
